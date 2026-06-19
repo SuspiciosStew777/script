@@ -1,0 +1,260 @@
+-- МЬЮТЕКС (Защита от повторного запуска)
+if _G.MyFlyScript and type(_G.MyFlyScript.Shutdown) == "function" then
+	_G.MyFlyScript.Shutdown()
+end
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+
+-- ВАШИ НАСТРОЙКИ (ОПТИМИЗИРОВАННЫЕ)
+local TOGGLE_KEY = Enum.KeyCode.F
+local BOOST_KEY = Enum.KeyCode.RightShift
+local METER = 3.28 -- 1 метр в Roblox студах
+
+local FLY_SPEED = 60 -- Скорость полета (Ваша настройка)
+local HOVER_AMPLITUDE = 0.45 * METER -- Амплитуда покачивания (Ваша настройка)
+local HOVER_SPEED = 4 -- Скорость покачивания (Ваша настройка)
+
+local TILT_ANGLE = 30 -- Угол наклона вперед в градусах (Ваша настройка)
+local TILT_SPEED = 8 -- Скорость перехода в наклон (Ваша настройка)
+
+-- Параметры суперсоника под кастомный пресет
+local BOOST_SPEED = 160 -- Ускоренная скорость (адаптировано под базу 60)
+local BOOST_DURATION = 4 
+local BOOST_COOLDOWN = 2 
+
+-- Переменные состояния
+local isFlying = false
+local isBoosting = false
+local boostCooldownActive = false
+local currentFlySpeed = FLY_SPEED
+
+local flyConnection = nil
+local inputBeganConnection = nil
+local originalGravity = Workspace.Gravity
+
+-- Физические объекты
+local bodyVelocity = nil
+local bodyGyro = nil
+
+-- Функция для плавного перемещения
+local function tweenCFrame(part, targetCFrame, duration, style)
+	local tweenInfo = TweenInfo.new(duration, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local tween = TweenService:Create(part, tweenInfo, {CFrame = targetCFrame})
+	tween:Play()
+	return tween
+end
+
+-- Функция создания эффекта преодоления звукового барьера
+local function createSonicBoomEffects(rootPart)
+	-- 1. БЕЛЫЙ ТРЕЙЛ (СЛЕД)
+	local attachment0 = Instance.new("Attachment")
+	attachment0.Position = Vector3.new(0, 1, 0)
+	attachment0.Parent = rootPart
+
+	local attachment1 = Instance.new("Attachment")
+	attachment1.Position = Vector3.new(0, -1, 0)
+	attachment1.Parent = rootPart
+
+	local trail = Instance.new("Trail")
+	trail.Attachment0 = attachment0
+	trail.Attachment1 = attachment1
+	trail.Color = ColorSequence.new(Color3.new(1, 1, 1))
+	trail.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.2),
+		NumberSequenceKeypoint.new(1, 1)
+	})
+	trail.Lifetime = 0.4 
+	trail.WidthScale = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(1, 0)
+	})
+	trail.Parent = rootPart
+
+	-- 2. СВЕРХЗВУКОВАЯ ВОЛНА (КОЛЬЦО)
+	local wave = Instance.new("SelectionSphere")
+	wave.Color3 = Color3.new(1, 1, 1)
+	wave.SurfaceTransparency = 0.5
+	wave.Adornee = rootPart
+	wave.Parent = rootPart
+
+	task.spawn(function()
+		local waveDuration = 0.4
+		local startTime = os.clock()
+		
+		while os.clock() - startTime < waveDuration do
+			local progress = (os.clock() - startTime) / waveDuration
+			if wave and wave.Parent then
+				wave.SurfaceTransparency = 0.5 + (progress * 0.5)
+			end
+			task.wait()
+		end
+		if wave then wave:Destroy() end
+	end)
+
+	return {trail, attachment0, attachment1}
+end
+
+-- Логика полета
+local function startFlying(character, rootPart, humanoid)
+	humanoid.PlatformStand = true
+	rootPart.Anchored = false 
+	currentFlySpeed = FLY_SPEED
+	
+	bodyVelocity = Instance.new("BodyVelocity")
+	bodyVelocity.MaxForce = Vector3.new(1, 1, 1) * math.huge
+	bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+	bodyVelocity.Parent = rootPart
+
+	bodyGyro = Instance.new("BodyGyro")
+	bodyGyro.MaxTorque = Vector3.new(1, 1, 1) * math.huge
+	bodyGyro.CFrame = rootPart.CFrame
+	bodyGyro.P = 10000 
+	bodyGyro.Parent = rootPart
+	
+	local hoverTimer = 0
+	local currentTilt = 0
+	
+	flyConnection = RunService.RenderStepped:Connect(function(deltaTime)
+		if not rootPart or not rootPart.Parent or not isFlying then return end
+		
+		local moveDirection = Vector3.new()
+		local camera = Workspace.CurrentCamera
+		
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDirection = moveDirection + camera.CFrame.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDirection = moveDirection - camera.CFrame.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDirection = moveDirection - camera.CFrame.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDirection = moveDirection + camera.CFrame.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDirection = moveDirection + Vector3.new(0, 1, 0) end
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then moveDirection = moveDirection - Vector3.new(0, 1, 0) end
+		
+		local isMoving = moveDirection.Magnitude > 0
+		local targetVelocity = Vector3.new(0, 0, 0)
+		
+		if isMoving then
+			targetVelocity = moveDirection.Unit * currentFlySpeed
+		end
+		
+		-- Применение ваших настроек покачивания
+		hoverTimer = hoverTimer + deltaTime * HOVER_SPEED
+		local hoverVelocityY = math.cos(hoverTimer) * (HOVER_AMPLITUDE * HOVER_SPEED)
+		
+		bodyVelocity.Velocity = Vector3.new(targetVelocity.X, targetVelocity.Y + hoverVelocityY, targetVelocity.Z)
+		
+		-- Применение угла наклона (в суперсонике ложится до 45 градусов)
+		local activeTiltAngle = isBoosting and 45 or TILT_ANGLE
+		local targetTilt = isMoving and math.rad(activeTiltAngle) or 0
+		currentTilt = currentTilt + (targetTilt - currentTilt) * (deltaTime * TILT_SPEED)
+		
+		local lookAt = camera.CFrame.LookVector
+		local baseRotation = CFrame.lookAt(rootPart.Position, rootPart.Position + Vector3.new(lookAt.X, 0, lookAt.Z))
+		
+		bodyGyro.CFrame = baseRotation * CFrame.Angles(-currentTilt, 0, 0)
+		
+		rootPart.AssemblyLinearVelocity = bodyVelocity.Velocity
+		rootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+	end)
+end
+
+local function stopFlying(rootPart, humanoid)
+	if flyConnection then flyConnection:Disconnect() flyConnection = nil end
+	if bodyVelocity then bodyVelocity:Destroy() bodyVelocity = nil end
+	if bodyGyro then bodyGyro:Destroy() bodyGyro = nil end
+	if humanoid then humanoid.PlatformStand = false end
+	if rootPart then rootPart.Anchored = false end
+	Workspace.Gravity = originalGravity
+	isFlying = false
+	isBoosting = false
+	currentFlySpeed = FLY_SPEED
+end
+
+-- Обработка клавиш
+inputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	local character = player.Character
+	if not character then return end
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not rootPart or not humanoid then return end
+
+	-- Активация / Деактивация полета (F)
+	if input.KeyCode == TOGGLE_KEY then
+		if not isFlying then
+			isFlying = true
+			rootPart.Anchored = true
+			
+			local dipCFrame = rootPart.CFrame * CFrame.new(0, -0.1 * METER, 0)
+			local dipTween = tweenCFrame(rootPart, dipCFrame, 0.15, Enum.EasingStyle.Quad)
+			dipTween.Completed:Wait()
+			
+			if not isFlying then rootPart.Anchored = false return end
+			
+			local launchCFrame = rootPart.CFrame * CFrame.new(0, 2 * METER, 0)
+			local launchTween = tweenCFrame(rootPart, launchCFrame, 0.25, Enum.EasingStyle.Back)
+			launchTween.Completed:Wait()
+			
+			if not isFlying then rootPart.Anchored = false return end
+			
+			startFlying(character, rootPart, humanoid)
+		else
+			isFlying = false
+			stopFlying(rootPart, humanoid)
+			
+			rootPart.Anchored = true
+			local raycastParams = RaycastParams.new()
+			raycastParams.FilterDescendantsInstances = {character}
+			raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+			
+			local raycastResult = Workspace:Raycast(rootPart.Position, Vector3.new(0, -500, 0), raycastParams)
+			local targetY = raycastResult and raycastResult.Position.Y + (humanoid.HipHeight + rootPart.Size.Y/2) or rootPart.Position.Y - 10
+			
+			local landCFrame = CFrame.new(rootPart.Position.X, targetY, rootPart.Position.Z) * (rootPart.CFrame - rootPart.Position)
+			local landTween = tweenCFrame(rootPart, landCFrame, 0.3, Enum.EasingStyle.Quad)
+			landTween.Completed:Wait()
+			
+			rootPart.Anchored = false
+		end
+	
+	-- Активация Суперсоника (LeftShift)
+	elseif input.KeyCode == BOOST_KEY and isFlying and not isBoosting and not boostCooldownActive then
+		isBoosting = true
+		currentFlySpeed = BOOST_SPEED
+		
+		local fxObjects = createSonicBoomEffects(rootPart)
+		
+		task.delay(BOOST_DURATION, function()
+			if isFlying and isBoosting then
+				isBoosting = false
+				currentFlySpeed = FLY_SPEED
+				
+				if fxObjects then
+					for _, obj in ipairs(fxObjects) do
+						if obj:IsA("Trail") then obj.Enabled = false end
+						task.delay(1, function() if obj then obj:Destroy() end end)
+					end
+				end
+				
+				boostCooldownActive = true
+				task.wait(BOOST_COOLDOWN)
+				boostCooldownActive = false
+			end
+		end)
+	end
+end)
+
+-- РЕГИСТРАЦИЯ ТЕКУЩЕГО СКРИПТА В МЬЮТЕКСЕ _G
+_G.MyFlyScript = {
+	Shutdown = function()
+		if inputBeganConnection then inputBeganConnection:Disconnect() inputBeganConnection = nil end
+		local character = player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		stopFlying(rootPart, humanoid)
+	end
+}
