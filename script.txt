@@ -17,7 +17,6 @@ local camera = Workspace.CurrentCamera
 
 -- КЛАВИШИ И НАСТРОЙКИ
 local TOGGLE_KEY = Enum.KeyCode.F
-local BOOST_KEY = Enum.KeyCode.RightShift
 local HEART_ESP_KEY = Enum.KeyCode.T
 local LASER_EYES_KEY = Enum.KeyCode.H
 local METER = 3.28 
@@ -77,7 +76,7 @@ local sndSonicBoom = createSound(100261872009811, 1.2, false)
 local sndLaserBurn = createSound(114537309582892, 1, true)
 local sndFlyChance = createSound(97863436735876, 1, false)
 
--- ГРАФИКА ДЛЯ ESP (Используем контейнер для Adornments)
+-- ГРАФИКА ДЛЯ ESP
 local coreFolder = Workspace:FindFirstChild("HomelanderESPFolder") or Instance.new("Folder")
 coreFolder.Name = "HomelanderESPFolder"
 coreFolder.Parent = Workspace
@@ -207,7 +206,7 @@ local function startGlobalLoops()
 			if rightLaserSelection then rightLaserSelection.Adornee = nil end
 		end
 
-		-- ОБНОВЛЕННЫЙ ESP КУБИКОВ (Вместо картинок — BoxHandleAdornment, обходящий любые лимиты рендеринга GUI)
+		-- ESP КУБИКОВ
 		if heartEspEnabled then
 			local myChar = player.Character
 			local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -221,10 +220,8 @@ local function startGlobalLoops()
 
 						if oTorso then
 							local distance = (myRoot.Position - oTorso.Position).Magnitude
-							-- Радиус 500 метров
 							if distance <= (500 * METER) then
 								if not boxAdorn then
-									-- BoxHandleAdornment идеально виден сквозь любые стены и работает без ограничений на 40+ игроков
 									boxAdorn = Instance.new("BoxHandleAdornment")
 									boxAdorn.Name = "ESP_" .. otherPlayer.Name
 									boxAdorn.AlwaysOnTop = true
@@ -234,7 +231,6 @@ local function startGlobalLoops()
 									boxAdorn.Parent = coreFolder
 								end
 								
-								-- Динамическая пульсация частоты BPM от расстояния
 								local rawProximity = distance / (500 * METER)
 								if rawProximity > 1 then rawProximity = 1 elseif rawProximity < 0 then rawProximity = 0 end
 								local proximity = 1 - rawProximity
@@ -243,7 +239,6 @@ local function startGlobalLoops()
 								local speedMult = bpm / 60
 								local pulse = 1 + (math.sin(os.clock() * math.pi * 2 * speedMult) * 0.3)
 								
-								-- Маленький бьющийся кубик прямо по центру груди
 								local baseSize = 0.45 * pulse
 								boxAdorn.Size = Vector3.new(baseSize, baseSize, baseSize)
 							else
@@ -402,8 +397,8 @@ inputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameP
 			rootPart.Anchored = false
 		end
 
-	-- СУПЕРСОНИК
-	elseif input.KeyCode == BOOST_KEY and isFlying and not isBoosting and not boostCooldownActive then
+	-- СУПЕРСОНИК (Поддержка RightShift и LeftShift)
+	elseif (input.KeyCode == Enum.KeyCode.RightShift or input.KeyCode == Enum.KeyCode.LeftShift) and isFlying and not isBoosting and not boostCooldownActive then
 		isBoosting = true
 		currentFlySpeed = BOOST_SPEED
 		sndSonicBoom:Play() 
@@ -460,4 +455,4 @@ pcall(function()
 	})
 end)
 
-print("[FlyScript Log]: Скрипт полностью инициализирован. Лимиты GUI успешно обойдены через BoxHandleAdornment.")
+print("[FlyScript Log]: Скрипт полностью инициализирован. Добавлена поддержка RightShift и LeftShift для Суперсоника.")
