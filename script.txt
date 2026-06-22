@@ -1,6 +1,8 @@
 -- МЬЮТЕКС (Защита от повторного запуска)
 if _G.MyFlyScript and type(_G.MyFlyScript.Shutdown) == "function" then
-	_G.MyFlyScript.Shutdown()
+	print("[FlyScript Log]: Запущена очистка старого скрипта...")
+	local success, err = pcall(function() _G.MyFlyScript.Shutdown() end)
+	if not success then warn("[FlyScript Error]: Ошибка при очистке старого скрипта: " .. tostring(err)) end
 end
 
 local Players = game:GetService("Players")
@@ -8,27 +10,33 @@ local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
 
 local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
 
--- ВАШИ НАСТРОЙКИ (ОПТИМИЗИРОВАННЫЕ)
+-- КЛАВИШИ И НАСТРОЙКИ
 local TOGGLE_KEY = Enum.KeyCode.F
 local BOOST_KEY = Enum.KeyCode.RightShift
-local METER = 3.28 -- 1 метр в Roblox студах
+local HEART_ESP_KEY = Enum.KeyCode.T
+local LASER_EYES_KEY = Enum.KeyCode.H
+local METER = 3.28 
 
-local FLY_SPEED = 60 -- Скорость полета (Ваша настройка)
-local HOVER_AMPLITUDE = 0.45 * METER -- Амплитуда покачивания (Ваша настройка)
-local HOVER_SPEED = 4 -- Скорость покачивания (Ваша настройка)
+local FLY_SPEED = 60 
+local HOVER_AMPLITUDE = 0.45 * METER 
+local HOVER_SPEED = 4 
 
-local TILT_ANGLE = 30 -- Угол наклона вперед в градусах (Ваша настройка)
-local TILT_SPEED = 8 -- Скорость перехода в наклон (Ваша настройка)
+local TILT_ANGLE = 30 
+local TILT_SPEED = 8 
 
--- Параметры суперсоника под кастомный пресет
-local BOOST_SPEED = 160 -- Ускоренная скорость (адаптировано под базу 60)
+-- Параметры суперсоника
+local BOOST_SPEED = 160 
 local BOOST_DURATION = 4 
 local BOOST_COOLDOWN = 2 
+local ORIGINAL_FOV = camera.FieldOfView
+local BOOST_FOV = ORIGINAL_FOV + 25
 
--- Переменные состояния
+-- Переменные состояния полета и эффектов
 local isFlying = false
 local isBoosting = false
 local boostCooldownActive = false
@@ -36,13 +44,48 @@ local currentFlySpeed = FLY_SPEED
 
 local flyConnection = nil
 local inputBeganConnection = nil
-local originalGravity = Workspace.Gravity
+local inputEndedConnection = nil
+local heartUpdateConnection = nil
 
--- Физические объекты
+local originalGravity = Workspace.Gravity
 local bodyVelocity = nil
 local bodyGyro = nil
 
--- Функция для плавного перемещения
+-- Флаги функций
+local heartEspEnabled = false
+local laserEyesEnabled = false
+local isFiringLasers = false
+
+-- Флаг для редкого звука в полете (срабатывает ровно 1 раз за полет)
+local hasPlayedChanceSoundThisFlight = false
+
+-- ЗВУКИ
+local function createSound(id, volume, looped)
+	local sound = Instance.new("Sound")
+	sound.SoundId = "rbxassetid://" .. tostring(id)
+	sound.Volume = volume or 1
+	sound.Looped = looped or false
+	sound.Parent = player:WaitForChild("PlayerGui")
+	return sound
+end
+
+local sndLand = createSound(113337904848957, 1, false)
+local sndPreFly = createSound(99564490958733, 1, false)
+local sndStartFly = createSound(83989830855885, 1, false)
+local sndFlyLoop = createSound(139095330035399, 0.15, true)
+local sndSonicBoom = createSound(100261872009811, 1.2, false)
+local sndLaserBurn = createSound(114537309582892, 1, true)
+local sndFlyChance = createSound(97863436735876, 1, false)
+
+-- ГРАФИКА ДЛЯ ESP (Используем контейнер для Adornments)
+local coreFolder = Workspace:FindFirstChild("HomelanderESPFolder") or Instance.new("Folder")
+coreFolder.Name = "HomelanderESPFolder"
+coreFolder.Parent = Workspace
+
+local leftEyePart, rightEyePart, leftLaserSelection, rightLaserSelection
+local screenGui = Instance.new("ScreenGui", player:WaitForChild("PlayerGui"))
+screenGui.Name = "LaserGui"
+
 local function tweenCFrame(part, targetCFrame, duration, style)
 	local tweenInfo = TweenInfo.new(duration, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 	local tween = TweenService:Create(part, tweenInfo, {CFrame = targetCFrame})
@@ -50,61 +93,180 @@ local function tweenCFrame(part, targetCFrame, duration, style)
 	return tween
 end
 
--- Функция создания эффекта преодоления звукового барьера
+-- Эффекты суперсоника (Кольцо горизонтально движению)
 local function createSonicBoomEffects(rootPart)
-	-- 1. БЕЛЫЙ ТРЕЙЛ (СЛЕД)
-	local attachment0 = Instance.new("Attachment")
+	local attachment0 = Instance.new("Attachment", rootPart)
 	attachment0.Position = Vector3.new(0, 1, 0)
-	attachment0.Parent = rootPart
-
-	local attachment1 = Instance.new("Attachment")
+	local attachment1 = Instance.new("Attachment", rootPart)
 	attachment1.Position = Vector3.new(0, -1, 0)
-	attachment1.Parent = rootPart
 
-	local trail = Instance.new("Trail")
+	local trail = Instance.new("Trail", rootPart)
 	trail.Attachment0 = attachment0
 	trail.Attachment1 = attachment1
 	trail.Color = ColorSequence.new(Color3.new(1, 1, 1))
-	trail.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.2),
-		NumberSequenceKeypoint.new(1, 1)
-	})
+	trail.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.2), NumberSequenceKeypoint.new(1, 1)})
 	trail.Lifetime = 0.4 
-	trail.WidthScale = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 1),
-		NumberSequenceKeypoint.new(1, 0)
-	})
-	trail.Parent = rootPart
+	trail.WidthScale = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0)})
 
-	-- 2. СВЕРХЗВУКОВАЯ ВОЛНА (КОЛЬЦО)
-	local wave = Instance.new("SelectionSphere")
-	wave.Color3 = Color3.new(1, 1, 1)
-	wave.SurfaceTransparency = 0.5
-	wave.Adornee = rootPart
-	wave.Parent = rootPart
+	local ringMesh = Instance.new("SpecialMesh")
+	ringMesh.MeshId = "rbxassetid://3270017" 
+	ringMesh.Scale = Vector3.new(1, 1, 0.1)
+
+	local wavePart = Instance.new("Part")
+	wavePart.Size = Vector3.new(1, 1, 1)
+	wavePart.Transparency = 0.4
+	wavePart.Color = Color3.new(1, 1, 1)
+	wavePart.Anchored = true
+	wavePart.CanCollide = false
+	wavePart.CFrame = rootPart.CFrame
+	
+	ringMesh.Parent = wavePart
+	wavePart.Parent = Workspace
 
 	task.spawn(function()
-		local waveDuration = 0.4
+		local duration = 0.5
 		local startTime = os.clock()
-		
-		while os.clock() - startTime < waveDuration do
-			local progress = (os.clock() - startTime) / waveDuration
-			if wave and wave.Parent then
-				wave.SurfaceTransparency = 0.5 + (progress * 0.5)
+		while os.clock() - startTime < duration do
+			local progress = (os.clock() - startTime) / duration
+			if wavePart and wavePart.Parent then
+				local sizeMult = 1 + (progress * 60)
+				ringMesh.Scale = Vector3.new(sizeMult, sizeMult, 0.1)
+				wavePart.Transparency = 0.4 + (progress * 0.6)
 			end
 			task.wait()
 		end
-		if wave then wave:Destroy() end
+		if wavePart then wavePart:Destroy() end
 	end)
 
 	return {trail, attachment0, attachment1}
 end
 
--- Логика полета
+-- Включение лазерных глаз
+local function toggleLaserEyes(state)
+	laserEyesEnabled = state
+	local char = player.Character
+	if not char or not char:FindFirstChild("Head") then return end
+
+	if state then
+		local function createEyePart(offset)
+			local p = Instance.new("Part", char)
+			p.Size = Vector3.new(0.2, 0.2, 0.2)
+			p.Color = Color3.fromRGB(255, 0, 0)
+			p.Material = Enum.Material.Neon
+			p.CanCollide = false
+			local w = Instance.new("Weld", p)
+			w.Part0 = char.Head
+			w.Part1 = p
+			w.C0 = CFrame.new(offset, 0.1, -0.5)
+			return p
+		end
+		leftEyePart, rightEyePart = createEyePart(-0.25), createEyePart(0.25)
+
+		local function createLaser()
+			local b = Instance.new("BoxHandleAdornment", screenGui)
+			b.Color3 = Color3.fromRGB(255, 0, 0)
+			b.AlwaysOnTop = true
+			b.ZIndex = 10
+			b.Transparency = 0.5
+			return b
+		end
+		leftLaserSelection, rightLaserSelection = createLaser(), createLaser()
+	else
+		if leftEyePart then leftEyePart:Destroy() end
+		if rightEyePart then rightEyePart:Destroy() end
+		if leftLaserSelection then leftLaserSelection:Destroy() end
+		if rightLaserSelection then rightLaserSelection:Destroy() end
+		leftEyePart, rightEyePart, leftLaserSelection, rightLaserSelection = nil, nil, nil, nil
+		isFiringLasers = false
+		sndLaserBurn:Stop()
+	end
+end
+-- РЕНДЕР И ЦИКЛЫ ОБНОВЛЕНИЯ
+local function startGlobalLoops()
+	heartUpdateConnection = RunService.RenderStepped:Connect(function()
+		-- Просчет Лазеров
+		if laserEyesEnabled and isFiringLasers and leftEyePart and leftLaserSelection and rightEyePart and rightLaserSelection then
+			pcall(function()
+				local mouse = UserInputService:GetMouseLocation()
+				local unitRay = camera:ScreenPointToRay(mouse.X, mouse.Y)
+				local result = Workspace:Raycast(unitRay.Origin, unitRay.Direction * 1000, RaycastParams.new())
+				local targetPos = result and result.Position or (unitRay.Origin + unitRay.Direction * 1000)
+
+				local distL = (targetPos - leftEyePart.Position).Magnitude
+				leftLaserSelection.Adornee = leftEyePart
+				leftLaserSelection.Size = Vector3.new(0.15, 0.15, distL)
+				leftLaserSelection.CFrame = CFrame.lookAt(Vector3.new(0,0,0), leftEyePart.CFrame:PointToObjectSpace(targetPos)) * CFrame.new(0, 0, -distL/2)
+
+				local distR = (targetPos - rightEyePart.Position).Magnitude
+				rightLaserSelection.Adornee = rightEyePart
+				rightLaserSelection.Size = Vector3.new(0.15, 0.15, distR)
+				rightLaserSelection.CFrame = CFrame.lookAt(Vector3.new(0,0,0), rightEyePart.CFrame:PointToObjectSpace(targetPos)) * CFrame.new(0, 0, -distR/2)
+			end)
+		else
+			if leftLaserSelection then leftLaserSelection.Adornee = nil end
+			if rightLaserSelection then rightLaserSelection.Adornee = nil end
+		end
+
+		-- ОБНОВЛЕННЫЙ ESP КУБИКОВ (Вместо картинок — BoxHandleAdornment, обходящий любые лимиты рендеринга GUI)
+		if heartEspEnabled then
+			local myChar = player.Character
+			local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+			
+			if myRoot then
+				for _, otherPlayer in ipairs(Players:GetPlayers()) do
+					if otherPlayer ~= player then
+						local oChar = otherPlayer.Character
+						local oTorso = oChar and (oChar:FindFirstChild("UpperTorso") or oChar:FindFirstChild("Torso"))
+						local boxAdorn = coreFolder:FindFirstChild("ESP_" .. otherPlayer.Name)
+
+						if oTorso then
+							local distance = (myRoot.Position - oTorso.Position).Magnitude
+							-- Радиус 500 метров
+							if distance <= (500 * METER) then
+								if not boxAdorn then
+									-- BoxHandleAdornment идеально виден сквозь любые стены и работает без ограничений на 40+ игроков
+									boxAdorn = Instance.new("BoxHandleAdornment")
+									boxAdorn.Name = "ESP_" .. otherPlayer.Name
+									boxAdorn.AlwaysOnTop = true
+									boxAdorn.ZIndex = 5
+									boxAdorn.Color3 = Color3.fromRGB(255, 0, 0)
+									boxAdorn.Adornee = oTorso
+									boxAdorn.Parent = coreFolder
+								end
+								
+								-- Динамическая пульсация частоты BPM от расстояния
+								local rawProximity = distance / (500 * METER)
+								if rawProximity > 1 then rawProximity = 1 elseif rawProximity < 0 then rawProximity = 0 end
+								local proximity = 1 - rawProximity
+								
+								local bpm = 60 + (proximity * 90)
+								local speedMult = bpm / 60
+								local pulse = 1 + (math.sin(os.clock() * math.pi * 2 * speedMult) * 0.3)
+								
+								-- Маленький бьющийся кубик прямо по центру груди
+								local baseSize = 0.45 * pulse
+								boxAdorn.Size = Vector3.new(baseSize, baseSize, baseSize)
+							else
+								if boxAdorn then boxAdorn:Destroy() end
+							end
+						else
+							if boxAdorn then boxAdorn:Destroy() end
+						end
+					end
+				end
+			end
+		else
+			coreFolder:ClearAllChildren()
+		end
+	end)
+end
+
+-- ЛОГИКА ПОЛЕТА
 local function startFlying(character, rootPart, humanoid)
 	humanoid.PlatformStand = true
 	rootPart.Anchored = false 
 	currentFlySpeed = FLY_SPEED
+	hasPlayedChanceSoundThisFlight = false 
 	
 	bodyVelocity = Instance.new("BodyVelocity")
 	bodyVelocity.MaxForce = Vector3.new(1, 1, 1) * math.huge
@@ -120,11 +282,12 @@ local function startFlying(character, rootPart, humanoid)
 	local hoverTimer = 0
 	local currentTilt = 0
 	
+	sndStartFly:Play()
+	sndFlyLoop:Play()
+	
 	flyConnection = RunService.RenderStepped:Connect(function(deltaTime)
 		if not rootPart or not rootPart.Parent or not isFlying then return end
-		
 		local moveDirection = Vector3.new()
-		local camera = Workspace.CurrentCamera
 		
 		if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDirection = moveDirection + camera.CFrame.LookVector end
 		if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDirection = moveDirection - camera.CFrame.LookVector end
@@ -138,26 +301,31 @@ local function startFlying(character, rootPart, humanoid)
 		
 		if isMoving then
 			targetVelocity = moveDirection.Unit * currentFlySpeed
+			sndFlyLoop.Volume = 0.15 
+			
+			if not hasPlayedChanceSoundThisFlight then
+				hasPlayedChanceSoundThisFlight = true 
+				if math.random(1, 100) <= 40 then
+					print("[FlyScript Log]: Сработал шанс 40% на воспроизведение звука в полете.")
+					sndFlyChance:Play()
+				end
+			end
+		else
+			sndFlyLoop.Volume = 0.02 
 		end
 		
-		-- Применение ваших настроек покачивания
 		hoverTimer = hoverTimer + deltaTime * HOVER_SPEED
 		local hoverVelocityY = math.cos(hoverTimer) * (HOVER_AMPLITUDE * HOVER_SPEED)
 		
 		bodyVelocity.Velocity = Vector3.new(targetVelocity.X, targetVelocity.Y + hoverVelocityY, targetVelocity.Z)
 		
-		-- Применение угла наклона (в суперсонике ложится до 45 градусов)
 		local activeTiltAngle = isBoosting and 45 or TILT_ANGLE
 		local targetTilt = isMoving and math.rad(activeTiltAngle) or 0
 		currentTilt = currentTilt + (targetTilt - currentTilt) * (deltaTime * TILT_SPEED)
 		
 		local lookAt = camera.CFrame.LookVector
 		local baseRotation = CFrame.lookAt(rootPart.Position, rootPart.Position + Vector3.new(lookAt.X, 0, lookAt.Z))
-		
 		bodyGyro.CFrame = baseRotation * CFrame.Angles(-currentTilt, 0, 0)
-		
-		rootPart.AssemblyLinearVelocity = bodyVelocity.Velocity
-		rootPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 	end)
 end
 
@@ -167,13 +335,14 @@ local function stopFlying(rootPart, humanoid)
 	if bodyGyro then bodyGyro:Destroy() bodyGyro = nil end
 	if humanoid then humanoid.PlatformStand = false end
 	if rootPart then rootPart.Anchored = false end
-	Workspace.Gravity = originalGravity
 	isFlying = false
 	isBoosting = false
 	currentFlySpeed = FLY_SPEED
+	sndFlyLoop:Stop()
+	sndFlyChance:Stop()
+	TweenService:Create(camera, TweenInfo.new(0.3), {FieldOfView = ORIGINAL_FOV}):Play()
 end
-
--- Обработка клавиш
+-- ОБРАБОТКА НАЖАТИЙ КЛАВИШ И ЗАКРЫТИЕ
 inputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 
@@ -183,11 +352,25 @@ inputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameP
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not rootPart or not humanoid then return end
 
-	-- Активация / Деактивация полета (F)
-	if input.KeyCode == TOGGLE_KEY then
+	if input.UserInputType == Enum.UserInputType.MouseButton1 and laserEyesEnabled then
+		isFiringLasers = true
+		sndLaserBurn:Play()
+	end
+
+	if input.KeyCode == HEART_ESP_KEY then
+		heartEspEnabled = not heartEspEnabled
+		print("[FlyScript Log]: Переключение ESP Сердец: " .. tostring(heartEspEnabled))
+	
+	elseif input.KeyCode == LASER_EYES_KEY then
+		toggleLaserEyes(not laserEyesEnabled)
+		print("[FlyScript Log]: Переключение Режима Глаз: " .. tostring(laserEyesEnabled))
+
+	-- КЛАВИША ПОЛЕТА (F)
+	elseif input.KeyCode == TOGGLE_KEY then
 		if not isFlying then
 			isFlying = true
 			rootPart.Anchored = true
+			sndPreFly:Play() 
 			
 			local dipCFrame = rootPart.CFrame * CFrame.new(0, -0.1 * METER, 0)
 			local dipTween = tweenCFrame(rootPart, dipCFrame, 0.15, Enum.EasingStyle.Quad)
@@ -200,46 +383,41 @@ inputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameP
 			launchTween.Completed:Wait()
 			
 			if not isFlying then rootPart.Anchored = false return end
-			
 			startFlying(character, rootPart, humanoid)
 		else
 			isFlying = false
 			stopFlying(rootPart, humanoid)
-			
 			rootPart.Anchored = true
-			local raycastParams = RaycastParams.new()
-			raycastParams.FilterDescendantsInstances = {character}
-			raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 			
-			local raycastResult = Workspace:Raycast(rootPart.Position, Vector3.new(0, -500, 0), raycastParams)
-			local targetY = raycastResult and raycastResult.Position.Y + (humanoid.HipHeight + rootPart.Size.Y/2) or rootPart.Position.Y - 10
+			local params = RaycastParams.new()
+			params.FilterDescendantsInstances = {character}
+			params.FilterType = Enum.RaycastFilterType.Exclude
+			local result = Workspace:Raycast(rootPart.Position, Vector3.new(0, -500, 0), params)
+			local targetY = result and result.Position.Y + (humanoid.HipHeight + rootPart.Size.Y/2) or rootPart.Position.Y - 10
 			
 			local landCFrame = CFrame.new(rootPart.Position.X, targetY, rootPart.Position.Z) * (rootPart.CFrame - rootPart.Position)
 			local landTween = tweenCFrame(rootPart, landCFrame, 0.3, Enum.EasingStyle.Quad)
+			sndLand:Play() 
 			landTween.Completed:Wait()
-			
 			rootPart.Anchored = false
 		end
-	
-	-- Активация Суперсоника (LeftShift)
+
+	-- СУПЕРСОНИК
 	elseif input.KeyCode == BOOST_KEY and isFlying and not isBoosting and not boostCooldownActive then
 		isBoosting = true
 		currentFlySpeed = BOOST_SPEED
+		sndSonicBoom:Play() 
+		TweenService:Create(camera, TweenInfo.new(0.4, Enum.EasingStyle.Cubic), {FieldOfView = BOOST_FOV}):Play()
 		
 		local fxObjects = createSonicBoomEffects(rootPart)
-		
 		task.delay(BOOST_DURATION, function()
 			if isFlying and isBoosting then
 				isBoosting = false
 				currentFlySpeed = FLY_SPEED
-				
+				TweenService:Create(camera, TweenInfo.new(0.4), {FieldOfView = ORIGINAL_FOV}):Play()
 				if fxObjects then
-					for _, obj in ipairs(fxObjects) do
-						if obj:IsA("Trail") then obj.Enabled = false end
-						task.delay(1, function() if obj then obj:Destroy() end end)
-					end
+					for _, obj in ipairs(fxObjects) do if obj and obj.Parent then obj:Destroy() end end
 				end
-				
 				boostCooldownActive = true
 				task.wait(BOOST_COOLDOWN)
 				boostCooldownActive = false
@@ -248,13 +426,38 @@ inputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameP
 	end
 end)
 
--- РЕГИСТРАЦИЯ ТЕКУЩЕГО СКРИПТА В МЬЮТЕКСЕ _G
+inputEndedConnection = UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then 
+		isFiringLasers = false 
+		sndLaserBurn:Stop() 
+	end
+end)
+
+startGlobalLoops()
+
 _G.MyFlyScript = {
 	Shutdown = function()
-		if inputBeganConnection then inputBeganConnection:Disconnect() inputBeganConnection = nil end
+		if inputBeganConnection then inputBeganConnection:Disconnect() end
+		if inputEndedConnection then inputEndedConnection:Disconnect() end
+		if heartUpdateConnection then heartUpdateConnection:Disconnect() end
+		if flyConnection then flyConnection:Disconnect() end
+		toggleLaserEyes(false)
+		if screenGui then screenGui:Destroy() end
+		if coreFolder then coreFolder:ClearAllChildren(); coreFolder:Destroy() end
+		sndLand:Destroy() sndPreFly:Destroy() sndStartFly:Destroy() sndFlyLoop:Destroy() sndSonicBoom:Destroy() sndLaserBurn:Destroy() sndFlyChance:Destroy()
 		local character = player.Character
-		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-		stopFlying(rootPart, humanoid)
+		stopFlying(character and character:FindFirstChild("HumanoidRootPart"), character and character:FindFirstChildOfClass("Humanoid"))
+		_G.MyFlyScript = nil
 	end
 }
+
+pcall(function()
+	StarterGui:SetCore("SendNotification", {
+		Title = "Homelander Script",
+		Text = "Homelander script successfully loaded. script by Anchens",
+		Icon = "rbxassetid://10851678031",
+		Duration = 5
+	})
+end)
+
+print("[FlyScript Log]: Скрипт полностью инициализирован. Лимиты GUI успешно обойдены через BoxHandleAdornment.")
